@@ -75,9 +75,9 @@ describe('bounded host-local code search', () => {
     expect(transcript).toContain('/codebase/unrelated/');
     expect(transcript).not.toContain('unrelated/f0.ts');
   });
-  it('reports bounded broad scans as partial and still permits a subsequent exact file read', async () => {
+  it('reports an output-capped literal search as partial and still permits a subsequent exact file read', async () => {
     await mkdir(join(dir, 'many'));
-    await Promise.all(Array.from({ length: LIMITS.filesVisited + 20 }, (_, i) => writeFile(join(dir, `many/f${i}.ts`), 'ordinary file')));
+    await writeFile(join(dir, 'many/hit.txt'), `${'missing '.repeat(80)}\n`.repeat(400));
     const workspace = await LocalWorkspace.create(dir, dir, p => p, liveSignal());
     const partial = await workspace.execute({ op: 'rg', path: '/codebase/many', pattern: 'missing' });
     expect(partial).toContain('[PARTIAL]');
@@ -85,9 +85,9 @@ describe('bounded host-local code search', () => {
     expect(await workspace.execute({ op: 'readfile', path: '/codebase/src/a.ts', start: 1, end: 3 })).toContain('return 42');
     expect((await workspace.snippet('/codebase/src/a.ts', 1, 3)).content).toContain('return 42');
   });
-  it('does not describe a truncated empty scan as a verified whole-workspace no-match', async () => {
+  it('does not describe a truncated match list as a verified whole-workspace no-match', async () => {
     await mkdir(join(dir, 'many'));
-    await Promise.all(Array.from({ length: LIMITS.filesVisited + 1 }, (_, i) => writeFile(join(dir, `many/f${i}.ts`), 'ordinary file')));
+    await writeFile(join(dir, 'many/hit.txt'), `${'missing '.repeat(80)}\n`.repeat(400));
     const completion = loop([marker({ command1: { op: 'rg', path: '/codebase/many', pattern: 'missing' } }), '[TOOL_CALLS]ANSWER{"files":[]}']);
     const result = await codeSearch(input(), dir, p => p, completion, liveSignal());
     expect(result.content).toContain('Search was partial');
@@ -112,7 +112,10 @@ describe('bounded host-local code search', () => {
     await Promise.all(Array.from({ length: 100 }, (_, i) => writeFile(join(dir, 'bulk', `f${i}.txt`), chunk)));
     const workspace = await LocalWorkspace.create(dir, dir, p => p, liveSignal());
     expect(await workspace.execute({ op: 'readfile', path: '/codebase/src/a.ts', start: 1, end: 1 })).toContain('export function target');
-    for (let i = 0; i < 6; i++) expect(await workspace.execute({ op: 'rg', path: '/codebase/bulk', pattern: 'NEVER' })).toContain('[PARTIAL]');
+    for (let i = 0; i < 6; i++) {
+      const text = await workspace.execute({ op: 'rg', path: '/codebase/bulk', pattern: 'NEVER' });
+      expect(text).not.toContain('AAAA');
+    }
     expect((await workspace.snippet('/codebase/src/a.ts', 1, 1)).content).toContain('export function target');
   });
   it('lets the model recover from readfile on a directory without weakening file validation', async () => {
@@ -123,15 +126,15 @@ describe('bounded host-local code search', () => {
     expect((await codeSearch(input(), dir, p => p, completion, liveSignal())).status).toBe('success');
     expect(JSON.stringify(vi.mocked(completion.complete).mock.calls)).toContain('Path is a directory');
   });
-  it('admits at most four commands from a live overfilled batch, reports skipped commands, and continues', async () => {
+  it('admits at most eight commands from a live overfilled batch, reports skipped commands, and continues', async () => {
     const completion = loop([
-      marker({ command1: { op: 'readfile', path: '/codebase/src/a.ts', start: 1, end: 3 }, command2: { op: 'ls' }, command3: { op: 'ls' }, command4: { op: 'ls' }, command5: { op: 'readfile', path: '/codebase/.env' }, command6: { op: 'bash' }, command7: { op: 'ls' }, command8: { op: 'ls' } }),
+      marker({ command1: { op: 'readfile', path: '/codebase/src/a.ts', start: 1, end: 3 }, command2: { op: 'ls' }, command3: { op: 'ls' }, command4: { op: 'ls' }, command5: { op: 'ls' }, command6: { op: 'ls' }, command7: { op: 'ls' }, command8: { op: 'ls' }, command9: { op: 'readfile', path: '/codebase/.env' }, command10: { op: 'bash' } }),
       '[TOOL_CALLS]ANSWER{"files":[{"path":"/codebase/src/a.ts","ranges":[{"start":1,"end":3}]}]}',
     ]);
     const result = await codeSearch(input(), dir, p => p, completion, liveSignal());
     expect(result.status).toBe('success');
     const transcript = JSON.stringify(vi.mocked(completion.complete).mock.calls);
-    expect(transcript).toContain('Commands beyond command4 were not executed');
+    expect(transcript).toContain('Commands beyond command8 were not executed');
     expect(transcript).not.toContain('FIXTURE_SECRET');
   });
   it('rejects an invalid admitted batch before executing its first valid command', async () => {

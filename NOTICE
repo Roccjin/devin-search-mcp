@@ -8,7 +8,26 @@ third_party/dsh-devin-search/NOTICE.
 
 Local changes:
 - src/code-search.ts accepts an optional turn budget (1 through 6, default 6)
-  and records literal rg patterns on the success result as keywords.
+  and records literal rg patterns on the success result as keywords. Each turn
+  runs up to eight commands. The first model message is a depth-limited
+  repository map (default 3, at most about 250KB) instead of only a root
+  listing. tree_depth, exclude_paths, and max_results (1 through 8) are
+  optional. Answer ranges are still re-read locally.
+- src/protocol.ts repairs a trailing comma or an unquoted key in one complete
+  tool-call object. Truncated JSON still fails. Stream trailers are unchanged.
+- src/local.ts runs literal rg through the bundled ripgrep binary with
+  --fixed-strings. A missing binary falls back to the bounded JavaScript
+  scan. Secrets, symlinks, and gitignore skips are still applied to hits.
+- Before the model runs, a smart-case literal probe of the query tokens adds
+  matching paths and up to four hotspot directories to the map. This follows
+  the fast-context-mcp 1.5.2 hotspot map, without its extra bootstrap model
+  round, BM25 file-header scan, git history score, or regex ripgrep.
+- If the model never returns a parseable answer, the same search retries at
+  most two likely subdirectories inside the original deadline. A verified
+  empty answer is not retried.
+- After a search, remaining result slots are filled from the literal patterns
+  the model already ran. Those files are re-read locally and labeled as grep
+  expansion. Lockfiles, images, and README/package manifests are skipped.
 - src/local.ts treats a gitignore rule's parent path (`..`) as outside that
   rule. The ignore package throws on `../`. File reads use `O_NOFOLLOW` when
   the platform defines it, and a normal read-only open otherwise. Windows

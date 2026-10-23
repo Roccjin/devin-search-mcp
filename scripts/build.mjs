@@ -8,7 +8,7 @@ const shared = {
   target: 'node22',
   banner: { js: '#!/usr/bin/env node' },
   legalComments: 'none',
-  external: ['@modelcontextprotocol/sdk', 'zod'],
+  external: ['@modelcontextprotocol/sdk', 'zod', '@vscode/ripgrep'],
 };
 
 await build({ ...shared, entryPoints: ['src/server.ts'], outfile: 'dist/server.js' });

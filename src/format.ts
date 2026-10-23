@@ -22,12 +22,34 @@ export function presentStatus(status: string, withHint: boolean): string {
   return withholdCredentials(`${text} ${LOGIN_HINT}`);
 }
 
+function configLine(result: CodeResult): string | undefined {
+  const meta = result.meta;
+  if (!meta) return;
+  const fell = meta.fellBack ? ` (fell back from ${meta.requestedTreeDepth})` : '';
+  let line = `[config] tree_depth=${meta.treeDepth}${fell}, tree_size=${(meta.treeBytes / 1024).toFixed(1)}KB, max_turns=${meta.maxTurns}, max_results=${meta.maxResults}`;
+  if (meta.hotspotDepth) line += `, hotspot_depth=${meta.hotspotDepth}`;
+  if (meta.hotDirs.length) line += `, hot_dirs=[${meta.hotDirs.join(', ')}]`;
+  if (meta.excludePaths.length) line += `, exclude_paths=[${meta.excludePaths.join(', ')}]`;
+  if (meta.grepExpanded) line += `, grep_expanded=${meta.grepExpanded}`;
+  return line;
+}
+
 export function formatCodeSearch(result: CodeResult, includeSnippets: boolean): string {
-  if (result.status === 'error' || result.files.length === 0) return withholdCredentials(rewriteLogin(result.content));
-  const lines = [`Found ${result.files.length} relevant files.`];
+  const config = configLine(result);
+  const notes = result.retryNotes ?? [];
+  if (result.status === 'error' || result.files.length === 0) {
+    const body = withholdCredentials(rewriteLogin([...notes, result.content].filter(Boolean).join('\n')));
+    return config ? `${body}\n${config}` : body;
+  }
+  const expanded = result.files.filter(file => file.fromGrep).length;
+  const summary = expanded > 0
+    ? `Found ${result.files.length} relevant files (${result.files.length - expanded} from AI search, ${expanded} from grep keyword expansion).`
+    : `Found ${result.files.length} relevant files.`;
+  const lines = [...notes, summary];
   result.files.forEach((file, index) => {
     const ranges = file.ranges.map(range => `L${range.start}-${range.end}`).join(', ');
-    lines.push(`  [${index + 1}/${result.files.length}] ${file.path} (${ranges})`);
+    const label = file.fromGrep ? ' [grep expanded]' : '';
+    lines.push(`  [${index + 1}/${result.files.length}] ${file.path} (${ranges})${label}`);
     if (includeSnippets) {
       for (const range of file.ranges) {
         lines.push(`  --- ${file.path}:${range.start}-${range.end} ---`);
@@ -42,6 +64,7 @@ export function formatCodeSearch(result: CodeResult, includeSnippets: boolean): 
   if (result.content.includes('Search was partial')) {
     lines.push('Search was partial; this is not evidence that the whole workspace has no matches.');
   }
+  if (config) lines.push(config);
   return withholdCredentials(lines.join('\n'));
 }
 

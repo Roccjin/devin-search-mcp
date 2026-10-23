@@ -1,9 +1,14 @@
+import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { lstat, realpath, open, opendir } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { rgPath } from '@vscode/ripgrep';
 import ignore, { type Ignore } from 'ignore';
-import { check, fail, object } from './safety.js';
+import { check, DevinError, fail, object } from './safety.js';
 export const LIMITS = { fileBytes: 512 * 1024, filesVisited: 512, entries: 4096, totalFilesVisited: 4096, totalEntries: 32768, stepReadBytes: 8 * 1024 * 1024, totalReadBytes: 32 * 1024 * 1024, stepBytes: 24 * 1024, totalBytes: 192 * 1024, snippetBytes: 48 * 1024, finalFiles: 8 };
+export const TREE_BYTES = 250 * 1024;
+const TREE_DIR_CAP = 48;
+const RG_DIRS = ['.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.cache', 'vendor', '.ssh', '.dsh', '.piwin', '.pi'];
 const forbidden = (path: string) => path.split(/[\\/]/).some(part => /^(?:\.git|node_modules|dist|build|coverage|\.next|\.cache|vendor|\.ssh|\.dsh|\.piwin|\.pi)$/i.test(part) || /(?:^\.env(?:\.|$)|credential|secret|(?:^|[._-])(?:token|private.?key|id_rsa|id_ed25519)(?:[._-]|$)|\.(?:pem|key|p12|pfx|keystore)$)/i.test(part));
 export function contains(root: string, path: string): boolean {
   const rel = relative(root, path); return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`));
@@ -22,6 +27,25 @@ function wildcard(pattern: string, text: string): boolean {
   }
   return row[text.length]!;
 }
+export interface RepoMap { text: string; depth: number; bytes: number; fellBack: boolean }
+export interface ProbeHit { rel: string; line: number }
+/** Short path fragments. No regular expressions and no parent traversal. */
+export function normalizeExclude(values: readonly string[] | undefined): string[] {
+  if (!values?.length) return [];
+  if (values.length > 32) return fail('bounds', 'exclude_paths accepts at most 32 patterns.');
+  const out: string[] = [];
+  for (const value of values) {
+    const pattern = value.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!pattern || pattern.length > 128 || pattern.split('/').includes('..') || !/^[A-Za-z0-9._*?/@-]+$/.test(pattern)) return fail('bounds', 'exclude_paths entries must be short path fragments without parent traversal.');
+    out.push(pattern);
+  }
+  return out;
+}
+export function excludeMatch(rel: string, pattern: string): boolean {
+  const base = rel.split('/').filter(Boolean).pop() ?? rel;
+  if (pattern.includes('*') || pattern.includes('?')) return wildcard(pattern, rel) || wildcard(pattern, base);
+  return rel === pattern || rel.startsWith(`${pattern}/`) || base === pattern || rel.split('/').includes(pattern);
+}
 export interface Command { op: 'rg' | 'readfile' | 'tree' | 'ls' | 'glob'; path?: string; pattern?: string; start?: number; end?: number }
 export function command(value: unknown): Command {
   const v = object(value);
@@ -35,7 +59,10 @@ export class LocalWorkspace {
   private entries = 0; private visited = 0; private bytes = 0; private readBytes = 0;
   private files?: string[]; private rules: Rule[] = []; private loadedRules = new Set<string>(); private visitedPaths = new Set<string>();
   private textCache = new Map<string, CachedText>();
+  private exclude: readonly string[] = [];
   partial = false;
+  useExclude(patterns: readonly string[]): void { this.exclude = patterns; }
+  private excluded(rel: string): boolean { return this.exclude.some(pattern => excludeMatch(rel, pattern)); }
   constructor(readonly root: string, private readonly signal: AbortSignal) {}
   static async create(cwd: string | undefined, folder: string, mapping: (p: string) => string | undefined, signal: AbortSignal): Promise<LocalWorkspace> {
     check(signal);
@@ -145,7 +172,7 @@ export class LocalWorkspace {
       if (++scan.entries > LIMITS.entries) { scan.partial = true; return; }
       if (++this.entries > LIMITS.totalEntries) return fail('bounds', 'Total directory entry budget exceeded.');
       const next = rel ? `${rel}/${entry.name}` : entry.name;
-      if (entry.isSymbolicLink() || this.ignored(next, entry.isDirectory())) continue;
+      if (entry.isSymbolicLink() || this.ignored(next, entry.isDirectory()) || this.excluded(next)) continue;
       if (entry.isDirectory()) {
         if (directories) yield `${next}/`;
         if (recursive) {
@@ -170,9 +197,125 @@ export class LocalWorkspace {
     if (this.bytes > LIMITS.totalBytes) return fail('bounds', 'Total command output budget exceeded.');
     return cut;
   }
+  async topDirectories(): Promise<string[]> {
+    const children = await this.listChildren('');
+    return children.filter(child => child.dir).map(child => child.name);
+  }
+  async subtreeMap(rel: string, depth: number): Promise<string> {
+    const lines = [`/codebase/${rel}/`];
+    await this.appendMap(rel, depth, lines);
+    return lines.join('\n');
+  }
+  /** Smart-case fixed strings. Used to point the map at files before the model runs. Does not count as a model command. */
+  async probeLiterals(patterns: readonly string[], cap: number): Promise<ProbeHit[]> {
+    const terms = [...new Set(patterns.map(pattern => pattern.trim()).filter(pattern => pattern.length >= 4 && pattern.length <= 64 && !pattern.includes('\0')))].slice(0, 6);
+    if (!terms.length || cap < 1) return [];
+    try {
+      const root = await this.fence('');
+      const args = ['--json', '--fixed-strings', '-S', '--color', 'never', '--max-columns', '200', '--max-filesize', '512K', '--glob-case-insensitive', '--max-count', '3'];
+      for (const name of RG_DIRS) args.push('--glob', `!${name}/**`, '--glob', `!${name}`);
+      for (const name of this.exclude) {
+        if (!name.includes('/') && !name.includes('*') && !name.includes('?')) args.push('--glob', `!${name}/**`, '--glob', `!${name}`);
+      }
+      for (const term of terms) args.push('-e', term);
+      args.push('--', root);
+      const run = await this.spawnRg(args);
+      return await this.pickHits(run.stdout, cap);
+    } catch (error) {
+      if (error instanceof DevinError && error.code === 'cancelled') throw error;
+      return [];
+    }
+  }
+  async literalHits(pattern: string, cap: number): Promise<ProbeHit[]> {
+    if (!pattern || pattern.includes('\0') || cap < 1) return [];
+    const found = await this.literalSearch('', pattern);
+    const hits: ProbeHit[] = [];
+    const seen = new Set<string>();
+    for (const line of found.text.split('\n')) {
+      const match = /^\/codebase\/(.+):(\d+): /.exec(line);
+      if (!match || seen.has(match[1]!)) continue;
+      seen.add(match[1]!);
+      hits.push({ rel: match[1]!, line: Number(match[2]) });
+      if (hits.length >= cap) break;
+    }
+    return hits;
+  }
+  private async pickHits(stdout: string, cap: number): Promise<ProbeHit[]> {
+    const hits: ProbeHit[] = [];
+    const seen = new Set<string>();
+    for (const row of stdout.split('\n')) {
+      if (hits.length >= cap) break;
+      if (!row) continue;
+      let event: { type?: string; data?: { path?: { text?: string }; line_number?: number } };
+      try { event = JSON.parse(row) as typeof event; } catch { continue; }
+      if (event.type !== 'match') continue;
+      const abs = event.data?.path?.text;
+      const lineNo = event.data?.line_number;
+      if (!abs || !lineNo) continue;
+      const relPath = relative(this.root, abs).split(sep).join('/');
+      if (!relPath || relPath === '..' || relPath.startsWith('../') || isAbsolute(relPath) || seen.has(relPath)) continue;
+      if (forbidden(relPath) || this.excluded(relPath)) continue;
+      try { await this.prepare(relPath); }
+      catch (error) {
+        if (error instanceof DevinError) continue;
+        throw error;
+      }
+      seen.add(relPath);
+      hits.push({ rel: relPath, line: lineNo });
+    }
+    return hits;
+  }
+  async repoMap(depth: number): Promise<RepoMap> {
+    check(this.signal);
+    for (let level = depth; level >= 1; level--) {
+      const lines = ['/codebase'];
+      await this.appendMap('', level, lines);
+      const text = lines.join('\n');
+      const bytes = Buffer.byteLength(text);
+      if (bytes <= TREE_BYTES) return { text, depth: level, bytes, fellBack: level < depth };
+    }
+    const children = await this.listChildren('');
+    const lines = ['/codebase'];
+    for (const child of children.slice(0, TREE_DIR_CAP)) lines.push(`/codebase/${child.name}${child.dir ? '/' : ''}`);
+    if (children.length > TREE_DIR_CAP) lines.push(`/codebase/ … ${children.length - TREE_DIR_CAP} more entries`);
+    const text = lines.join('\n');
+    return { text, depth: 0, bytes: Buffer.byteLength(text), fellBack: true };
+  }
+  private async listChildren(rel: string): Promise<{ name: string; dir: boolean }[]> {
+    check(this.signal);
+    const path = await this.fence(rel);
+    if (!(await lstat(path)).isDirectory()) return [];
+    await this.loadRules(rel);
+    const children: { name: string; dir: boolean }[] = [];
+    const dir = await opendir(path);
+    for await (const entry of dir) {
+      check(this.signal);
+      if (entry.isSymbolicLink()) continue;
+      const next = rel ? `${rel}/${entry.name}` : entry.name;
+      if (this.ignored(next, entry.isDirectory()) || this.excluded(next)) continue;
+      if (!entry.isDirectory() && !entry.isFile()) continue;
+      children.push({ name: entry.name, dir: entry.isDirectory() });
+    }
+    children.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    return children;
+  }
+  private async appendMap(rel: string, depthLeft: number, lines: string[]): Promise<void> {
+    const children = await this.listChildren(rel);
+    const shown = children.slice(0, TREE_DIR_CAP);
+    for (const child of shown) {
+      const next = rel ? `${rel}/${child.name}` : child.name;
+      lines.push(`/codebase/${next}${child.dir ? '/' : ''}`);
+      if (!child.dir || depthLeft <= 1) continue;
+      const nested = await this.listChildren(next);
+      if (nested.length > TREE_DIR_CAP) lines.push(`/codebase/${next}/ … ${nested.length} entries not expanded`);
+      else await this.appendMap(next, depthLeft - 1, lines);
+    }
+    if (children.length > TREE_DIR_CAP) lines.push(`${rel ? `/codebase/${rel}/` : '/codebase/'} … ${children.length - TREE_DIR_CAP} more entries`);
+  }
   async execute(cmd: Command): Promise<string> {
     check(this.signal); const rel = this.virtual(cmd.path ?? '/codebase');
     await this.prepare(rel);
+    if (rel && this.excluded(rel)) return fail('path', 'Excluded paths are not searched.');
     if (cmd.op === 'readfile') {
       if ((await lstat(await this.fence(rel))).isDirectory()) return this.retain('Path is a directory, not a file. Use ls or tree here to discover a file, then readfile on that exact path.');
       const start = cmd.start ?? 1; const end = cmd.end ?? start + 199;
@@ -180,6 +323,108 @@ export class LocalWorkspace {
       return this.retain((await this.text(rel, true, true)).split('\n').slice(start - 1, end).map((l, i) => `${start + i}: ${l}`).join('\n'));
     }
     if (cmd.op === 'rg' && !cmd.pattern) return fail('bounds', 'Literal rg requires a nonempty pattern.');
+    if (cmd.op === 'rg') {
+      const found = await this.literalSearch(rel, cmd.pattern!);
+      this.partial ||= found.partial;
+      return this.retain(found.text);
+    }
+    const scan: Scan = { entries: 0, files: 0, partial: false }; const out: string[] = [];
+    let size = 0;
+    const append = (line: string): boolean => {
+      const bytes = Buffer.byteLength(line) + 1;
+      if (size + bytes > LIMITS.stepBytes - 512) { scan.partial = true; return false; }
+      out.push(line); size += bytes; return true;
+    };
+    for await (const file of this.walk(rel, scan, cmd.op !== 'ls', cmd.op === 'ls' || cmd.op === 'tree', cmd.op === 'tree' ? 2 : 24)) {
+      if ((cmd.op !== 'glob' || wildcard(cmd.pattern ?? '*', file)) && !append(`/codebase/${file}`)) break;
+    }
+    this.partial ||= scan.partial;
+    return this.retain(out.join('\n') + (scan.partial ? PARTIAL : ''));
+  }
+  private async literalSearch(rel: string, pattern: string): Promise<{ text: string; partial: boolean }> {
+    if (pattern.includes('\0')) return { text: '', partial: false };
+    try {
+      const root = await this.fence(rel);
+      const args = ['--json', '--fixed-strings', '--color', 'never', '--max-columns', '2000', '--max-filesize', '512K', '--glob-case-insensitive'];
+      for (const name of RG_DIRS) args.push('--glob', `!${name}/**`, '--glob', `!${name}`);
+      for (const name of this.exclude) {
+        if (!name.includes('/') && !name.includes('*') && !name.includes('?')) args.push('--glob', `!${name}/**`, '--glob', `!${name}`);
+      }
+      args.push('--', pattern, root);
+      const run = await this.spawnRg(args);
+      return await this.collectRg(run.stdout, run.truncated);
+    } catch (error) {
+      if (error instanceof DevinError) throw error;
+      return this.walkLiteral(rel, pattern);
+    }
+  }
+  private spawnRg(args: string[]): Promise<{ stdout: string; truncated: boolean }> {
+    const timeout = AbortSignal.timeout(20_000);
+    const signal = AbortSignal.any([this.signal, timeout]);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const chunks: Buffer[] = [];
+      const finish = (error?: unknown, value?: { stdout: string; truncated: boolean }) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(error);
+        else resolve(value!);
+      };
+      const child = spawn(rgPath, args, { signal, env: { ...process.env, RIPGREP_CONFIG_PATH: '' } });
+      let bytes = 0;
+      let truncated = false;
+      child.stdout.on('data', (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > LIMITS.stepBytes * 8) { truncated = true; child.kill(); return; }
+        chunks.push(chunk);
+      });
+      child.stderr.on('data', () => {});
+      child.on('error', error => {
+        const stdout = Buffer.concat(chunks).toString('utf8');
+        if (this.signal.aborted) finish(new DevinError('cancelled', 'Devin operation cancelled or timed out.'));
+        else if (timeout.aborted) finish(undefined, { stdout, truncated: true });
+        else finish(error);
+      });
+      child.on('close', code => {
+        const stdout = Buffer.concat(chunks).toString('utf8');
+        if (this.signal.aborted) finish(new DevinError('cancelled', 'Devin operation cancelled or timed out.'));
+        else if (timeout.aborted || code === null) finish(undefined, { stdout, truncated: true });
+        else if (code === 2) finish(new Error('ripgrep failed'));
+        else finish(undefined, { stdout, truncated });
+      });
+    });
+  }
+  private async collectRg(stdout: string, truncated: boolean): Promise<{ text: string; partial: boolean }> {
+    const out: string[] = [];
+    let size = 0;
+    let partial = truncated;
+    const append = (line: string): boolean => {
+      const bytes = Buffer.byteLength(line) + 1;
+      if (size + bytes > LIMITS.stepBytes - 512) { partial = true; return false; }
+      out.push(line); size += bytes; return true;
+    };
+    for (const row of stdout.split('\n')) {
+      if (!row) continue;
+      let event: { type?: string; data?: { path?: { text?: string }; lines?: { text?: string }; line_number?: number } };
+      try { event = JSON.parse(row) as typeof event; } catch { partial = true; break; }
+      if (event.type !== 'match') continue;
+      const abs = event.data?.path?.text;
+      const lineNo = event.data?.line_number;
+      if (!abs || !lineNo) continue;
+      const relPath = relative(this.root, abs).split(sep).join('/');
+      if (!relPath || relPath === '..' || relPath.startsWith('../') || isAbsolute(relPath)) continue;
+      if (forbidden(relPath) || this.excluded(relPath)) continue;
+      try { await this.prepare(relPath); }
+      catch (error) {
+        if (error instanceof DevinError) continue;
+        throw error;
+      }
+      const text = (event.data?.lines?.text ?? '').replace(/\r?\n$/, '').slice(0, 2000);
+      if (!append(`/codebase/${relPath}:${lineNo}: ${text}`)) break;
+    }
+    return { text: out.join('\n') + (partial ? PARTIAL : ''), partial };
+  }
+  private async walkLiteral(rel: string, pattern: string): Promise<{ text: string; partial: boolean }> {
     const scan: Scan = { entries: 0, files: 0, partial: false }; const out: string[] = [];
     let size = 0; const readStart = this.readBytes;
     const append = (line: string): boolean => {
@@ -187,28 +432,22 @@ export class LocalWorkspace {
       if (size + bytes > LIMITS.stepBytes - 512) { scan.partial = true; return false; }
       out.push(line); size += bytes; return true;
     };
-    outer: for await (const file of this.walk(rel, scan, cmd.op !== 'ls', cmd.op === 'ls' || cmd.op === 'tree', cmd.op === 'tree' ? 2 : 24)) {
-      if (cmd.op !== 'rg') {
-        if ((cmd.op !== 'glob' || wildcard(cmd.pattern ?? '*', file)) && !append(`/codebase/${file}`)) break;
-        continue;
-      }
+    outer: for await (const file of this.walk(rel, scan, true, false, 24)) {
       if (this.readBytes - readStart >= LIMITS.stepReadBytes) { scan.partial = true; break; }
       let text: string;
       try { text = await this.text(file, true, true); }
       catch (error) {
         check(this.signal);
         if (error instanceof Error && error.message.startsWith('Total file read budget')) { scan.partial = true; break; }
-        // Skip unusable text, not path-race or cancellation failures.
         if (error instanceof Error && /^(File is not regular text|Binary files|Non-UTF8 files)/.test(error.message)) continue;
         throw error;
       }
       const lines = text.split('\n');
-      for (let i = 0; i < lines.length; i++) if (lines[i]!.includes(cmd.pattern!)) {
+      for (let i = 0; i < lines.length; i++) if (lines[i]!.includes(pattern)) {
         if (!append(`/codebase/${file}:${i + 1}: ${lines[i]!.slice(0, 2000)}`)) break outer;
       }
     }
-    this.partial ||= scan.partial;
-    return this.retain(out.join('\n') + (scan.partial ? PARTIAL : ''));
+    return { text: out.join('\n') + (scan.partial ? PARTIAL : ''), partial: scan.partial };
   }
   async snippet(virtual: string, start: number, end: number): Promise<{ path: string; start: number; end: number; content: string }> {
     const rel = this.virtual(virtual); await this.prepare(rel);

@@ -29,7 +29,12 @@ describe('strict Connect/protobuf transport', () => {
     expect(streamText(Buffer.concat([frame(new Writer().string(2, '<ANSWER></ANSWER></s>').build()), done()])))
       .toBe('<ANSWER></ANSWER>');
     expect(() => toolMarker('[TOOL_CALLS]evil[ARGS]{broken')).toThrow('JSON');
-    expect(() => toolMarker('[TOOL_CALLS]evil[ARGS]{"command1":{"op":"ls",}}')).toThrow('JSON');
+    expect(toolMarker('[TOOL_CALLS]evil[ARGS]{"command1":{"op":"ls",}}'))
+      .toEqual({ name: 'evil', args: { command1: { op: 'ls' } } });
+    expect(toolMarker('[TOOL_CALLS]evil[ARGS]{command1:{op:"ls"}}'))
+      .toEqual({ name: 'evil', args: { command1: { op: 'ls' } } });
+    expect(toolMarker('[TOOL_CALLS]evil[ARGS]{"keep":"a,}b"}'))
+      .toEqual({ name: 'evil', args: { keep: 'a,}b' } });
   });
   it.each([
     ['partial header', Buffer.from([1, 0])],

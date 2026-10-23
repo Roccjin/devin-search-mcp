@@ -86,7 +86,7 @@ Credentials are stored at `~/.config/devin-search/credentials.json`. Set `DEVIN_
 
 | Tool | Role |
 |---|---|
-| `devin_code_search` | `query` and `project_path` are required. `max_turns` is 1–6, default 6. `include_snippets` defaults to false |
+| `devin_code_search` | `query` and `project_path` are required. `max_turns` is 1–6, default 6. `tree_depth` is 1–6, default 3, and shrinks if the map exceeds about 250KB. A literal probe adds relevant paths and hotspot directories before the model runs. If the model returns no parseable paths, the search retries up to two likely subdirectories. Unused result slots are then filled from the literal patterns the model already ran, labeled `[grep expanded]`. `exclude_paths` skips extra path fragments. `max_results` is 1–8, default 8. `include_snippets` defaults to false. Literal search uses the bundled ripgrep |
 | `devin_status` | Whether the session is logged in, and when it expires. No token |
 | `devin_web_search` | Registered by default. `max_results` is 1–10, default 10. Set `DEVIN_WEB_SEARCH=0` to skip it |
 

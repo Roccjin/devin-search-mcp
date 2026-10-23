@@ -86,7 +86,7 @@ devin-logout             # 删除本机会话
 
 | 工具 | 作用 |
 |---|---|
-| `devin_code_search` | `query`、`project_path` 必填。`max_turns` 为 1–6，默认 6。`include_snippets` 默认 false |
+| `devin_code_search` | `query`、`project_path` 必填。`max_turns` 为 1–6，默认 6。`tree_depth` 为 1–6，默认 3，目录树超过约 250KB 会自动变浅。开搜前用字面量探针标出相关路径和热点目录。模型没给出可解析路径时，最多再搜两个可能的子目录。答完后，用模型已经搜过的字面量补满剩余名额，这些文件标成 `[grep expanded]`。`exclude_paths` 额外排除路径片段。`max_results` 为 1–8，默认 8。`include_snippets` 默认 false。字面量搜索使用自带的 ripgrep |
 | `devin_status` | 是否登录、何时过期。不返回令牌 |
 | `devin_web_search` | 默认注册。`max_results` 为 1–10，默认 10。`DEVIN_WEB_SEARCH=0` 时不注册 |
 

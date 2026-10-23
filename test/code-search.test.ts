@@ -45,6 +45,7 @@ describe('code search', () => {
     expect(result.files[0]?.path.endsWith('/src/a.ts')).toBe(true);
     const text = formatCodeSearch(result, false);
     expect(text).toContain('grep keywords: target');
+    expect(text).toContain('[config] tree_depth=');
     expect(text).not.toContain('export const target');
   });
 
@@ -56,6 +57,9 @@ describe('code search', () => {
       query: 'target',
       projectPath: dir,
       maxTurns: 1,
+      treeDepth: 3,
+      maxResults: 8,
+      excludePaths: [],
       includeSnippets: false,
     }, new AbortController().signal);
     expect(result.isError).toBe(true);

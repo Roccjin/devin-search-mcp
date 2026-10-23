@@ -24,6 +24,9 @@ export interface CodeQuery {
   query: string;
   projectPath: string;
   maxTurns: number;
+  treeDepth: number;
+  maxResults: number;
+  excludePaths: readonly string[];
   includeSnippets: boolean;
 }
 
@@ -91,7 +94,13 @@ export async function runCodeSearch(runtime: SearchRuntime, input: CodeQuery, si
   let result: SearchResult;
   try {
     result = await codeSearch(
-      { search_term: input.query, search_folder_absolute_uri: input.projectPath },
+      {
+        search_term: input.query,
+        search_folder_absolute_uri: input.projectPath,
+        tree_depth: input.treeDepth,
+        max_results: input.maxResults,
+        exclude_paths: input.excludePaths,
+      },
       input.projectPath,
       identityPath,
       runtime.cloud,

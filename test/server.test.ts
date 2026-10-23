@@ -44,6 +44,10 @@ describe('mcp server', () => {
     const web = listed.tools.find(tool => tool.name === 'devin_web_search');
     const schema = web?.inputSchema as { properties?: { max_results?: { default?: number } } } | undefined;
     expect(schema?.properties?.max_results?.default).toBe(10);
+    const code = listed.tools.find(tool => tool.name === 'devin_code_search');
+    const codeSchema = code?.inputSchema as { properties?: { tree_depth?: { default?: number }; max_results?: { default?: number } } } | undefined;
+    expect(codeSchema?.properties?.tree_depth?.default).toBe(3);
+    expect(codeSchema?.properties?.max_results?.default).toBe(8);
     const status = textOf(await client.callTool({ name: 'devin_status', arguments: {} }));
     const url = status.text.match(/https:\/\/app\.devin\.ai\/auth\/cli\/continue\?\S+/)?.[0];
     expect(url).toBeTruthy();

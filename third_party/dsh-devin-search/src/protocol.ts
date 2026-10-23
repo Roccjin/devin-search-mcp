@@ -62,10 +62,55 @@ export function toolMarker(text: string): { name: string; args: Record<string, u
   const name = marker[1]!;
   const raw = rest.slice(marker[0].length).trim().replace(/<\/s>\s*$/, '');
   // Framing only: a later sentence or a second tool call is not part of this object.
-  // The object itself stays strict JSON. Truncation, trailing commas, and broken tokens still fail.
-  const args = object(json(Buffer.from(jsonObject(raw))));
-  if (!args) return fail('protocol', 'Invalid Devin tool arguments.');
+  // Truncation still fails. A complete object may be repaired for a trailing comma or an unquoted key.
+  const slice = jsonObject(raw);
+  const args = parsedObject(slice) ?? parsedObject(repairToolJson(slice));
+  if (!args) return fail('protocol', 'Invalid Devin JSON response.');
   return { name, args };
+}
+/** Trailing commas and unquoted keys, outside strings only. Does not invent missing brackets. */
+export function repairToolJson(text: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === ',') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j]!)) j++;
+      if (text[j] === '}' || text[j] === ']') continue;
+      out += ch;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(ch)) {
+      const prev = out.trimEnd();
+      const boundary = prev.length === 0 || prev.endsWith('{') || prev.endsWith(',') || prev.endsWith('[');
+      if (boundary) {
+        let j = i + 1;
+        while (j < text.length && /[\w$-]/.test(text[j]!)) j++;
+        let k = j;
+        while (k < text.length && /\s/.test(text[k]!)) k++;
+        if (text[k] === ':') {
+          out += `"${text.slice(i, j)}"`;
+          i = j - 1;
+          continue;
+        }
+      }
+    }
+    out += ch;
+  }
+  return out;
+}
+function parsedObject(text: string): Record<string, unknown> | undefined {
+  try { return object(JSON.parse(text) as unknown); } catch { return undefined; }
 }
 function jsonObject(text: string): string {
   if (!text.startsWith('{')) return fail('protocol', 'Invalid Devin JSON response.');

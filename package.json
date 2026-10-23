@@ -1,0 +1,56 @@
+{
+  "name": "devin-local-search-mcp",
+  "version": "0.1.0",
+  "description": "本机 Devin 代码搜索的 stdio MCP 与命令行。Local stdio MCP and CLI for Devin code search.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Roccjin/devin-search-mcp.git"
+  },
+  "homepage": "https://github.com/Roccjin/devin-search-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Roccjin/devin-search-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "devin",
+    "code-search",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "devin-local-search-mcp": "./dist/server.js",
+    "devin-login": "./dist/cli.js",
+    "devin-logout": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build && node scripts/smoke.mjs",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "ignore": "7.0.5",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.0",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

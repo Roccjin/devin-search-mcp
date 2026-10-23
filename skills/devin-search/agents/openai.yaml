@@ -1,0 +1,4 @@
+interface:
+  display_name: "Devin Search"
+  short_description: "Call devin_code_search before manual exploration"
+  default_prompt: "Use $devin-search to locate the relevant code, then read those files before editing."

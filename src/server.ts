@@ -47,7 +47,7 @@ function toolResult(result: ToolText) {
 export async function createDevinServer(options: { runtime?: SearchRuntime; env?: NodeJS.ProcessEnv } = {}): Promise<DevinServer> {
   const env = options.env ?? process.env;
   const runtime = options.runtime ?? await openSearchRuntime(env);
-  const server = new McpServer({ name: 'devin-search', version: '0.1.0' });
+  const server = new McpServer({ name: 'devin-search', version: '0.1.1' });
   server.registerTool('devin_code_search', {
     description: CODE_DESCRIPTION,
     inputSchema: {

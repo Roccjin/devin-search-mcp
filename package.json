@@ -1,6 +1,6 @@
 {
   "name": "devin-local-search-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "本机 Devin 代码搜索的 stdio MCP 与命令行。Local stdio MCP and CLI for Devin code search.",
   "type": "module",
   "license": "MIT",
